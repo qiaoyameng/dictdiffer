@@ -6,10 +6,13 @@
 import unittest
 from collections import OrderedDict
 from collections.abc import MutableMapping, MutableSequence
+from copy import deepcopy
+from itertools import product
 
 import pytest
 
-from dictdiffer import HAS_NUMPY, diff, dot_lookup, patch, revert, swap
+from dictdiffer import (HAS_NUMPY, byte_cost, diff, dot_lookup, patch,
+                        revert, swap)
 from dictdiffer.utils import PathLimit
 
 
@@ -580,6 +583,250 @@ class DictDifferTests(unittest.TestCase):
         assert list(diff(daa, dba)) == []
         assert list(diff(daa, dbb)) == [('change', ['a', 0], ('a', 'b'))]
         assert list(diff(dba, dbb)) == [('change', ['a', 0], ('a', 'b'))]
+
+
+class DiffCostTests(unittest.TestCase):
+    def test_byte_cost_is_deterministic(self):
+        first_operation = (
+            'change', 'a',
+            ({'z': 1, 'a': 2}, {'b': {3, 1, 2}})
+        )
+        second_operation = (
+            'change', 'a',
+            ({'a': 2, 'z': 1}, {'b': {1, 2, 3}})
+        )
+        assert byte_cost(first_operation) == byte_cost(second_operation)
+
+    def test_cost_func_must_be_callable(self):
+        self.assertRaises(
+            TypeError,
+            lambda: list(diff({}, {}, cost_func=42))
+        )
+
+    def test_cost_keyword_alias(self):
+        first = {'a': {'x': 1, 'y': 2, 'z': 3}}
+        second = {'a': {'x': 4, 'y': 5, 'z': 6}}
+        result = list(diff(first, second, cost=byte_cost))
+        assert result == [
+            ('change', 'a', (
+                {'x': 1, 'y': 2, 'z': 3},
+                {'x': 4, 'y': 5, 'z': 6}
+            ))
+        ]
+
+    def test_large_subtree_change_uses_subtree_replacement(self):
+        first = {'a': {'x': 1, 'y': 2, 'z': 3}}
+        second = {'a': {'x': 10, 'y': 20, 'z': 30}}
+
+        result = list(diff(first, second, cost_func=byte_cost))
+
+        assert result == [
+            ('change', 'a', (
+                {'x': 1, 'y': 2, 'z': 3},
+                {'x': 10, 'y': 20, 'z': 30}
+            ))
+        ]
+        assert patch(result, first) == second
+        assert revert(result, second) == first
+
+    def test_single_leaf_change_keeps_leaf_granularity(self):
+        unchanged = 'long unchanged value that keeps subtree payload stable'
+        first = {'a': {'x': 1, 'unchanged': unchanged}}
+        second = {'a': {'x': 2, 'unchanged': unchanged}}
+
+        result = list(diff(first, second, cost_func=byte_cost))
+
+        assert result == [('change', 'a.x', (1, 2))]
+        assert patch(result, first) == second
+        assert revert(result, second) == first
+
+    def test_root_subtree_can_also_be_replaced(self):
+        first = {'a': 1, 'b': 2, 'c': 3}
+        second = {'a': 10, 'b': 20, 'c': 30}
+
+        result = list(diff(first, second, cost_func=byte_cost))
+
+        assert result == [
+            ('change', '', (
+                {'a': 1, 'b': 2, 'c': 3},
+                {'a': 10, 'b': 20, 'c': 30}
+            ))
+        ]
+        assert patch(result, first) == second
+        assert revert(result, second) == first
+
+    def test_all_legal_granularity_choices_are_compared(self):
+        nodes = ('a', 'b')
+        leaves = ('x', 'y')
+
+        def selected_plan(first, second, changed):
+            result = list(diff(first, second, cost_func=byte_cost))
+            replacements = {
+                node for action, node, changes in result
+                if action == 'change' and isinstance(changes, tuple) and
+                isinstance(changes[0], dict)
+            }
+            if replacements:
+                return replacements
+            return {
+                '{}.{}'.format(node, leaf)
+                for node in nodes for leaf in leaves
+                if (node, leaf) in changed
+            }
+
+        def plans(changed):
+            branch_options = []
+            for node in nodes:
+                leaves = {leaf for branch, leaf in changed
+                          if branch == node}
+                if leaves:
+                    fine = {'{}.{}'.format(node, leaf) for leaf in leaves}
+                    branch_options.append([fine, frozenset((node,))])
+
+            for selected in product(*branch_options):
+                plan = set()
+                for option in selected:
+                    plan.update(option)
+                yield plan
+            if changed:
+                yield frozenset(('',))
+
+        def operations_for(plan, first, second):
+            operations = []
+            for item in plan:
+                if item == '':
+                    operations.append(
+                        ('change', '', (first, second))
+                    )
+                elif item in nodes:
+                    operations.append(
+                        ('change', item,
+                         (first[item], second[item]))
+                    )
+                else:
+                    node, leaf = item.split('.')
+                    operations.append(
+                        ('change', item,
+                         (first[node][leaf], second[node][leaf]))
+                    )
+            return operations
+
+        for mask in range(16):
+            changed = {
+                (node, leaf)
+                for index, node in enumerate(nodes)
+                for leaf_index, leaf in enumerate(leaves)
+                if mask & (1 << (index * 2 + leaf_index))
+            }
+            first = {node: {leaf: '{}-{}-old'.format(node, leaf)
+                            for leaf in leaves}
+                     for node in nodes}
+            second = deepcopy(first)
+            for node, leaf in changed:
+                second[node][leaf] = 'new-value-{}-{}'.format(node, leaf)
+
+            actual = list(diff(first, second, cost_func=byte_cost))
+            actual_cost = sum(map(byte_cost, actual))
+            candidate_costs = [
+                sum(map(byte_cost,
+                        operations_for(plan, first, second)))
+                for plan in plans(changed)
+            ]
+            assert actual_cost == min(candidate_costs)
+            assert selected_plan(first, second, changed) == min(
+                plans(changed),
+                key=lambda plan: sum(
+                    map(byte_cost, operations_for(plan, first, second))
+                )
+            )
+
+    def test_ignored_subtree_cannot_be_brought_in_by_replacement(self):
+        secret = 'excluded value is intentionally much longer'
+        first = {'a': {'x': 1, 'secret': secret}}
+        second = {'a': {'x': 2, 'secret': 'changed secret'}}
+
+        result = list(diff(first, second, ignore=['a.secret'],
+                           cost_func=lambda operation: (
+                               0 if operation[1] in ('', []) else 1
+                           )))
+
+        assert result == [('change', 'a.x', (1, 2))]
+        assert b'secret' not in repr(result).encode()
+        assert b'excluded value' not in repr(result).encode()
+        assert patch(result, first)['a']['secret'] == secret
+
+    def test_ignored_addition_is_filtered_from_full_subtree(self):
+        result = list(diff(
+            {},
+            {'a': {'x': 1, 'secret': 'excluded long value'}},
+            ignore=['a.secret'],
+            cost_func=lambda operation: (
+                0 if operation[1] in ('', []) else 1
+            )
+        ))
+
+        assert result == [('add', '', [('a', {'x': 1})])]
+        assert patch(result, {}) == {'a': {'x': 1}}
+        assert revert(result, {'a': {'x': 1, 'secret': 'kept'}}) == {}
+
+    def test_ignored_only_addition_is_pruned_without_leaking_value(self):
+        result = list(diff(
+            {},
+            {'a': {'secret': 'excluded long value'}},
+            ignore=['a.secret'],
+            cost_func=byte_cost
+        ))
+
+        assert result == []
+        assert b'excluded' not in repr(result).encode()
+
+    def test_path_limit_blocks_ancestor_subtree_replacement(self):
+        first = {'a': {'x': 1}, 'b': 2}
+        second = {'a': {'x': 2}, 'b': 3}
+
+        result = list(diff(first, second,
+                           path_limit=[('a', 'x')],
+                           cost_func=lambda operation: (
+                               0 if operation[1] in ('', []) else 1
+                           )))
+
+        assert result == [
+            ('change', ['a', 'x'], (1, 2)),
+            ('change', 'b', (2, 3))
+        ]
+        assert patch(result, first) == second
+        assert revert(result, second) == first
+
+    def test_path_limit_blocks_replacing_ancestor_of_added_subtree(self):
+        first = {}
+        second = {'a': {'x': {'many': 'fields'}}, 'b': 2}
+
+        result = list(diff(first, second,
+                           path_limit=[('a',)],
+                           cost_func=lambda operation: (
+                               0 if operation[1] in ('', []) else 1
+                           )))
+
+        assert result[0] == (
+            'add', '', [('a', {'x': {'many': 'fields'}}), ('b', 2)]
+        )
+        assert patch(result, first) == second
+        assert revert(result, second) == first
+
+    def test_ignore_takes_precedence_over_path_limit_aggregation(self):
+        first = {'a': {'x': 1, 'secret': 'old'}}
+        second = {'a': {'x': 2, 'secret': 'new'}}
+
+        result = list(diff(first, second,
+                           ignore=['a.secret'],
+                           path_limit=[('a',)],
+                           cost_func=lambda operation: (
+                               0 if operation[1] in ('', []) else 1
+                           )))
+
+        assert result == [('change', 'a.x', (1, 2))]
+        assert patch(result, first)['a']['secret'] == 'old'
+        assert revert(result, second)['a']['secret'] == 'new'
 
 
 class DiffPatcherTests(unittest.TestCase):

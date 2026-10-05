@@ -8,13 +8,15 @@
 from collections.abc import Iterable, MutableMapping, MutableSequence, MutableSet
 from copy import deepcopy
 
+from .cost import byte_cost, cost_diff
 from .utils import EPSILON, PathLimit, are_different, dot_lookup
 from .version import __version__
 
 (ADD, REMOVE, CHANGE) = (
     'add', 'remove', 'change')
 
-__all__ = ('diff', 'patch', 'swap', 'revert', 'dot_lookup', '__version__')
+__all__ = ('byte_cost', 'diff', 'patch', 'swap', 'revert',
+           'dot_lookup', '__version__')
 
 DICT_TYPES = (MutableMapping, )
 LIST_TYPES = (MutableSequence, )
@@ -29,14 +31,15 @@ except ImportError:  # pragma: no cover
 
 
 def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
-         tolerance=EPSILON, absolute_tolerance=None, dot_notation=True):
+         tolerance=EPSILON, absolute_tolerance=None, dot_notation=True,
+         cost_func=None, cost=None):
     """Compare two dictionary/list/set objects, and returns a diff result.
 
     Return an iterator with differences between two objects. The diff items
     represent addition/deletion/change and the item value is a *deep copy*
     from the corresponding source or destination objects.
 
-    >>> from dictdiffer import diff
+    >>> from dictdiffer import byte_cost, diff
     >>> result = diff({'a': 'b'}, {'a': 'c'})
     >>> list(result)
     [('change', 'a', ('b', 'c'))]
@@ -89,6 +92,12 @@ def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
     ... dot_notation=False))
     [('change', ['a', 'x'], (1, 2))]
 
+    A deterministic operation cost can select whole-subtree replacement:
+
+    >>> list(diff({'a': {'x': 1, 'y': 2, 'z': 3}},
+    ...      {'a': {'x': 4, 'y': 5, 'z': 6}}, cost_func=byte_cost))
+    [('change', 'a', ({'x': 1, 'y': 2, 'z': 3}, {'x': 4, 'y': 5, 'z': 6}))]
+
     :param first: The original dictionary, ``list`` or ``set``.
     :param second: New dictionary, ``list`` or ``set``.
     :param node: Key for comparison that can be used in :func:`dot_lookup`.
@@ -102,6 +111,11 @@ def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
     :param absolute_tolerance: Absolute threshold to consider when comparing
                                two float numbers.
     :param dot_notation: Boolean to toggle dot notation on and off.
+    :param cost_func: Deterministic callable returning the encoding cost of
+                      one diff operation. When supplied, a changed subtree is
+                      either replaced or represented by descendant operations,
+                      never both. Ties keep descendant operations. ``cost``
+                      is accepted as an alias.
 
     .. versionchanged:: 0.3
        Added *ignore* parameter.
@@ -124,6 +138,13 @@ def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
     if path_limit is not None and not isinstance(path_limit, PathLimit):
         path_limit = PathLimit(path_limit)
 
+    if cost_func is not None and cost is not None:
+        raise TypeError('cost and cost_func cannot be used together')
+    cost = cost if cost is not None else cost_func
+
+    if cost is not None and not callable(cost):
+        raise TypeError('cost_func must be callable')
+
     if isinstance(ignore, Iterable):
         def _process_ignore_value(value):
             if isinstance(value, int):
@@ -144,6 +165,12 @@ def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
             return '.'.join(node)
         else:
             return default_type(node)
+
+    def _is_ignored(path):
+        if ignore is None:
+            return False
+        return (dotted(path, default_type=tuple) in ignore or
+                tuple(path) in ignore)
 
     def _diff_recursive(_first, _second, _node=None):
         _node = _node or []
@@ -275,8 +302,14 @@ def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
                 yield CHANGE, dotted_node, (deepcopy(_first),
                                             deepcopy(_second))
 
-    return _diff_recursive(first, second, node)
-
+    if cost is None:
+        return _diff_recursive(first, second, node)
+    return cost_diff(
+        first, second, dotted, _is_ignored, path_limit,
+        lambda left, right: are_different(
+            left, right, tolerance, absolute_tolerance
+        ), expand, cost, node
+    )
 
 def patch(diff_result, destination, in_place=False):
     """Patch the diff result to the destination dictionary.
@@ -303,6 +336,21 @@ def patch(diff_result, destination, in_place=False):
                 dest[key] = value
 
     def change(node, changes):
+        if node == '' or node == []:
+            nonlocal destination
+            _, value = changes
+            if in_place and isinstance(destination, DICT_TYPES + LIST_TYPES
+                                       + SET_TYPES):
+                if isinstance(destination, SET_TYPES):
+                    destination.clear()
+                    destination |= value
+                elif isinstance(destination, LIST_TYPES):
+                    destination[:] = value
+                else:
+                    destination.clear()
+                    destination.update(value)
+                return destination
+            return value
         dest = dot_lookup(destination, node, parent=True)
         if isinstance(node, str):
             last_node = node.split('.')[-1]
@@ -328,7 +376,9 @@ def patch(diff_result, destination, in_place=False):
     }
 
     for action, node, changes in diff_result:
-        patchers[action](node, changes)
+        result = patchers[action](node, changes)
+        if result is not None:
+            destination = result
 
     return destination
 
@@ -392,4 +442,5 @@ def revert(diff_result, destination, in_place=False):
                      that revert will apply the changes directly to
                      and return the destination structure.
     """
-    return patch(swap(diff_result), destination, in_place)
+    diff_result = list(diff_result)
+    return patch(swap(reversed(diff_result)), destination, in_place)
