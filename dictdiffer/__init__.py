@@ -8,13 +8,15 @@
 from collections.abc import Iterable, MutableMapping, MutableSequence, MutableSet
 from copy import deepcopy
 
+from .align import AlignedDiff, RecordAlignment, _anchored_pairs
 from .utils import EPSILON, PathLimit, are_different, dot_lookup
 from .version import __version__
 
 (ADD, REMOVE, CHANGE) = (
     'add', 'remove', 'change')
 
-__all__ = ('diff', 'patch', 'swap', 'revert', 'dot_lookup', '__version__')
+__all__ = ('diff', 'patch', 'swap', 'revert', 'dot_lookup',
+           'AlignedDiff', 'RecordAlignment', '__version__')
 
 DICT_TYPES = (MutableMapping, )
 LIST_TYPES = (MutableSequence, )
@@ -29,7 +31,8 @@ except ImportError:  # pragma: no cover
 
 
 def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
-         tolerance=EPSILON, absolute_tolerance=None, dot_notation=True):
+         tolerance=EPSILON, absolute_tolerance=None, dot_notation=True,
+         align=None):
     """Compare two dictionary/list/set objects, and returns a diff result.
 
     Return an iterator with differences between two objects. The diff items
@@ -89,6 +92,18 @@ def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
     ... dot_notation=False))
     [('change', ['a', 'x'], (1, 2))]
 
+    Lists of records can be aligned by an identity field instead of their
+    position, so that one inserted record is not reported as a change of
+    every following record:
+
+    >>> first = [{'id': 1, 'v': 'a'}, {'id': 2, 'v': 'b'}]
+    >>> second = [{'id': 1, 'v': 'a'}, {'id': 3, 'v': 'x'}, {'id': 2, 'v': 'b'}]
+    >>> result = diff(first, second, align=RecordAlignment('id'))
+    >>> list(result)
+    [('add', '', [(1, {'id': 3, 'v': 'x'})])]
+    >>> result.mapping
+    {0: 0, 1: 2}
+
     :param first: The original dictionary, ``list`` or ``set``.
     :param second: New dictionary, ``list`` or ``set``.
     :param node: Key for comparison that can be used in :func:`dot_lookup`.
@@ -102,6 +117,9 @@ def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
     :param absolute_tolerance: Absolute threshold to consider when comparing
                                two float numbers.
     :param dot_notation: Boolean to toggle dot notation on and off.
+    :param align: Optional :class:`RecordAlignment` strategy used to align
+                  lists of records by their identity before comparing
+                  them. By default lists are compared positionally.
 
     .. versionchanged:: 0.3
        Added *ignore* parameter.
@@ -120,6 +138,9 @@ def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
 
     .. versionchanged:: 0.8
         Added *dot_notation* parameter.
+
+    .. versionchanged:: 0.10.1
+        Added *align* parameter.
     """
     if path_limit is not None and not isinstance(path_limit, PathLimit):
         path_limit = PathLimit(path_limit)
@@ -145,6 +166,44 @@ def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
         else:
             return default_type(node)
 
+    alignments = {}
+
+    def _diff_aligned(_first, _second, _node):
+        """Compare two lists of records aligned by their identity."""
+        pairs, removed, added = align.align(_first, _second)
+        alignments[tuple(_node)] = dict(pairs)
+
+        anchored, moved = _anchored_pairs(pairs)
+        deletion = sorted(removed + [i for i, _ in moved], reverse=True)
+        addition = sorted(added + [j for _, j in moved])
+
+        dotted_node = dotted(_node)
+
+        if deletion:
+            if expand:
+                for key in deletion:
+                    yield REMOVE, dotted_node, [(key, deepcopy(_first[key]))]
+            else:
+                yield REMOVE, dotted_node, [
+                    (key, deepcopy(_first[key])) for key in deletion]
+
+        if addition:
+            if expand:
+                for key in addition:
+                    yield ADD, dotted_node, [(key, deepcopy(_second[key]))]
+            else:
+                yield ADD, dotted_node, [
+                    (key, deepcopy(_second[key])) for key in addition]
+
+        for first_index, second_index in anchored:
+            recurred = _diff_recursive(
+                _first[first_index], _second[second_index],
+                _node=_node + [second_index],
+            )
+
+            for diffed in recurred:
+                yield diffed
+
     def _diff_recursive(_first, _second, _node=None):
         _node = _node or []
 
@@ -169,6 +228,12 @@ def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
 
         elif isinstance(_first, LIST_TYPES) and isinstance(_second,
                                                            LIST_TYPES):
+            if align is not None and align.applies(_first, _second):
+                for diffed in _diff_aligned(_first, _second, _node):
+                    yield diffed
+
+                return  # stop here for aligned lists of records
+
             len_first = len(_first)
             len_second = len(_second)
 
@@ -275,7 +340,12 @@ def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
                 yield CHANGE, dotted_node, (deepcopy(_first),
                                             deepcopy(_second))
 
-    return _diff_recursive(first, second, node)
+    result = _diff_recursive(first, second, node)
+    if align is None:
+        return result
+    aligned = AlignedDiff(result)
+    aligned.mappings = alignments
+    return aligned
 
 
 def patch(diff_result, destination, in_place=False):
@@ -352,12 +422,16 @@ def swap(diff_result):
         >>> next(swapped)
         ('change', 'a.b.c', ('b', 'a'))
 
+        >>> swapped = swap([('remove', 'a.b.c', [(2, 'c'), (1, 'b')])])
+        >>> next(swapped)
+        ('add', 'a.b.c', [(1, 'b'), (2, 'c')])
+
     """
     def add(node, changes):
         return REMOVE, node, list(reversed(changes))
 
     def remove(node, changes):
-        return ADD, node, changes
+        return ADD, node, list(reversed(changes))
 
     def change(node, changes):
         first, second = changes

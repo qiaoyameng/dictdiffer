@@ -1,6 +1,15 @@
 Changes
 =======
 
+Version 0.10.1 (unreleased)
+
+- diff: add optional ``align`` parameter with a ``RecordAlignment``
+  strategy that matches lists of records by identity instead of position
+- diff: return an ``AlignedDiff`` result exposing the original to new
+  record position mapping when ``align`` is used
+- swap: reverse the order of removals when swapping so that ``revert``
+  stays consistent for removals in the middle of a list
+
 Version v0.10.0 (released 2026-07-16)
 
 - chore(setup): migrate from setuptools to hatchling

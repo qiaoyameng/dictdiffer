@@ -98,6 +98,54 @@ Let's revert the last changes:
     reverted = revert(result, patched)
     assert reverted == first
 
+Aligning lists of records
+-------------------------
+
+By default lists are compared positionally, hence one inserted record
+shifts the positions of all following records and the diff reports a
+change for each of them. If the lists contain records (dictionaries)
+with an identity, the ``align`` parameter accepts a
+:class:`.RecordAlignment` strategy that matches records by their
+identity instead of their position:
+
+.. code-block:: python
+
+    from dictdiffer import RecordAlignment, diff, patch
+
+    first = [
+        {"id": 1, "status": "new"},
+        {"id": 2, "status": "new"},
+    ]
+    second = [
+        {"id": 1, "status": "new"},
+        {"id": 3, "status": "new"},
+        {"id": 2, "status": "done"},
+    ]
+
+    result = diff(first, second, align=RecordAlignment("id"))
+
+    assert list(result) == [
+        ("add", "", [(1, {"id": 3, "status": "new"})]),
+        ("change", [2, "status"], ("new", "done")),
+    ]
+
+    # the original to new position mapping is exposed separately
+    assert result.mapping == {0: 0, 1: 2}
+
+    assert patch(result, first) == second
+
+The identity does not have to be unique. Records sharing the same
+identity are paired so that the total field difference cost is minimal;
+ties are resolved deterministically and records that cannot be paired
+are reported as additions or removals. The cost of pairing two records
+can be customized with the ``field_cost`` parameter.
+
+The result can be used with :func:`.patch`, :func:`.swap` and
+:func:`.revert` like a regular diff. Note that :func:`.revert`
+reconstructs the original list exactly when the diff does not combine
+moved, added and removed records with changes, as the patch format is
+positional.
+
 A tolerance can be used to consider closed values as equal.
 The tolerance parameter only applies for int and float.
 
