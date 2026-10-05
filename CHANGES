@@ -1,6 +1,12 @@
 Changes
 =======
 
+Version 0.10.1 (released YYYY-MM-DD)
+
+- diff: add ``diff_optimal`` with an explicit cost model that chooses
+  between fine-grained operations and whole-subtree replacement, plus a
+  default ``byte_cost`` example cost function
+
 Version v0.10.0 (released 2026-07-16)
 
 - chore(setup): migrate from setuptools to hatchling
