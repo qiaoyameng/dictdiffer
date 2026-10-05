@@ -29,7 +29,8 @@ except ImportError:  # pragma: no cover
 
 
 def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
-         tolerance=EPSILON, absolute_tolerance=None, dot_notation=True):
+         tolerance=EPSILON, absolute_tolerance=None, dot_notation=True,
+         record_matcher=None):
     """Compare two dictionary/list/set objects, and returns a diff result.
 
     Return an iterator with differences between two objects. The diff items
@@ -89,6 +90,18 @@ def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
     ... dot_notation=False))
     [('change', ['a', 'x'], (1, 2))]
 
+    Lists of record dictionaries can be aligned by identity fields instead
+    of being compared positionally, so that an insertion is not reported
+    as a change of every following record:
+
+    >>> from dictdiffer.utils import RecordMatcher
+    >>> matcher = RecordMatcher('id')
+    >>> list(diff([{'id': 1}, {'id': 2}], [{'id': 0}, {'id': 1}, {'id': 2}],
+    ...           record_matcher=matcher))
+    [('add', '', [(0, {'id': 0})])]
+    >>> matcher.mappings
+    {(): {0: 1, 1: 2}}
+
     :param first: The original dictionary, ``list`` or ``set``.
     :param second: New dictionary, ``list`` or ``set``.
     :param node: Key for comparison that can be used in :func:`dot_lookup`.
@@ -102,6 +115,19 @@ def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
     :param absolute_tolerance: Absolute threshold to consider when comparing
                                two float numbers.
     :param dot_notation: Boolean to toggle dot notation on and off.
+    :param record_matcher: Optional :class:`dictdiffer.utils.RecordMatcher`
+                           used to align lists of record dictionaries by
+                           identity fields instead of comparing them
+                           positionally.  Matched records are compared
+                           field by field, unmatched records are reported
+                           as additions and removals and reordered records
+                           as remove and add pairs, so the result stays
+                           usable with :func:`patch` and :func:`revert`.
+                           The old to new position mapping of each aligned
+                           list is collected in the ``mappings`` attribute
+                           of the matcher, keyed by the node tuple.  Lists
+                           whose items are not all dictionaries are still
+                           compared positionally.
 
     .. versionchanged:: 0.3
        Added *ignore* parameter.
@@ -120,9 +146,15 @@ def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
 
     .. versionchanged:: 0.8
         Added *dot_notation* parameter.
+
+    .. versionchanged:: 0.10.1
+        Added *record_matcher* parameter.
     """
     if path_limit is not None and not isinstance(path_limit, PathLimit):
         path_limit = PathLimit(path_limit)
+
+    if record_matcher is not None:
+        record_matcher.mappings.clear()
 
     if isinstance(ignore, Iterable):
         def _process_ignore_value(value):
@@ -144,6 +176,57 @@ def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
             return '.'.join(node)
         else:
             return default_type(node)
+
+    def _diff_aligned_records(_first, _second, _node, _dotted_node):
+        """Compare two lists of records aligned by the record matcher."""
+        alignment = record_matcher.match(_first, _second)
+        record_matcher.mappings[tuple(_node)] = alignment.mapping
+
+        added = set(alignment.added)
+
+        # Compare the matched records field by field at their original
+        # positions, before any structural change is applied.
+        for index, other in alignment.pairs:
+            if path_limit and path_limit.path_is_limit(_node + [index]):
+                if _first[index] != _second[other]:
+                    yield CHANGE, _node + [index], (
+                        deepcopy(_first[index]), deepcopy(_second[other])
+                    )
+            else:
+                recurred = _diff_recursive(
+                    _first[index], _second[other],
+                    _node=_node + [index],
+                )
+
+                for diffed in recurred:
+                    yield diffed
+
+        # Remove the records without a match, highest index first.
+        if alignment.removed:
+            if expand:
+                for key in reversed(alignment.removed):
+                    yield REMOVE, _dotted_node, [
+                        (key, deepcopy(_first[key]))]
+            else:
+                yield REMOVE, _dotted_node, [
+                    (key, deepcopy(_first[key]))
+                    for key in reversed(alignment.removed)]
+
+        # Replay the target order: insert added records and move the
+        # matched ones to their new positions with remove and add pairs.
+        current = [other for _, other in alignment.pairs]
+        for key in range(len(_second)):
+            if key in added:
+                yield ADD, _dotted_node, [(key, deepcopy(_second[key]))]
+                current.insert(key, key)
+            else:
+                position = current.index(key)
+                if position != key:
+                    yield REMOVE, _dotted_node, [
+                        (position, deepcopy(_second[key]))]
+                    yield ADD, _dotted_node, [(key, deepcopy(_second[key]))]
+                    current.pop(position)
+                    current.insert(key, key)
 
     def _diff_recursive(_first, _second, _node=None):
         _node = _node or []
@@ -169,6 +252,17 @@ def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
 
         elif isinstance(_first, LIST_TYPES) and isinstance(_second,
                                                            LIST_TYPES):
+            if record_matcher is not None and \
+                all(isinstance(item, DICT_TYPES) for item in _first) and \
+                    all(isinstance(item, DICT_TYPES) for item in _second):
+                recurred = _diff_aligned_records(
+                    _first, _second, _node, dotted_node)
+
+                for diffed in recurred:
+                    yield diffed
+
+                return  # stop here for aligned records
+
             len_first = len(_first)
             len_second = len(_second)
 

@@ -6,7 +6,8 @@
 
 import math
 import sys
-from itertools import zip_longest
+from collections import namedtuple
+from itertools import permutations, zip_longest
 
 num_types = int, float
 EPSILON = sys.float_info.epsilon
@@ -274,3 +275,201 @@ def are_different(first, second, tolerance, absolute_tolerance=None):
         )
     # we got different values
     return True
+
+
+_MISSING = object()
+
+
+class Alignment(namedtuple('Alignment', ['pairs', 'removed', 'added'])):
+    """Describe how the records of two lists correspond to each other.
+
+    ``pairs`` holds ``(old_index, new_index)`` tuples of matched records
+    sorted by the old index, ``removed`` the old indices without a match
+    and ``added`` the new indices without a match.
+    """
+
+    __slots__ = ()
+
+    @property
+    def mapping(self):
+        """Return the old position to new position mapping of the pairs."""
+        return dict(self.pairs)
+
+
+def _exhaustive_assignment(costs, size_first, size_second):
+    """Return the minimum cost index pairs of a cost matrix.
+
+    Every row (or column, when there are fewer columns than rows) is
+    matched exactly once.  Ties are broken deterministically by choosing
+    the lexicographically smallest tuple of pairs.
+    """
+    best = None
+    if size_first <= size_second:
+        for perm in permutations(range(size_second), size_first):
+            pairs = tuple(enumerate(perm))
+            candidate = (sum(costs[i][j] for i, j in pairs), pairs)
+            if best is None or candidate < best:
+                best = candidate
+    else:
+        for perm in permutations(range(size_first), size_second):
+            pairs = tuple(sorted((i, j) for j, i in enumerate(perm)))
+            candidate = (sum(costs[i][j] for i, j in pairs), pairs)
+            if best is None or candidate < best:
+                best = candidate
+    return best[1]
+
+
+def _greedy_assignment(costs, size_first, size_second):
+    """Return index pairs by repeatedly picking the cheapest remaining one.
+
+    Used as a fallback for groups too large for the exhaustive search.
+    The result is deterministic because candidates are considered in
+    ``(cost, first_index, second_index)`` order.
+    """
+    candidates = sorted(
+        (costs[i][j], i, j)
+        for i in range(size_first) for j in range(size_second)
+    )
+    remaining_first = set(range(size_first))
+    remaining_second = set(range(size_second))
+    pairs = []
+    for cost, i, j in candidates:
+        if i in remaining_first and j in remaining_second:
+            pairs.append((i, j))
+            remaining_first.discard(i)
+            remaining_second.discard(j)
+    return tuple(sorted(pairs))
+
+
+class RecordMatcher(object):
+    """Align lists of record dictionaries by identity fields.
+
+    Records sharing the same identity are paired so that the total field
+    difference cost of the pairs is minimal.  When several pairings have
+    the same minimal cost, the lexicographically smallest tuple of
+    ``(old_index, new_index)`` pairs is chosen, so the result is always
+    deterministic.  Records without a partner are reported as removals
+    and additions.  Pairing is always one to one, therefore two distinct
+    record objects with equal values are never merged into one.
+
+        >>> from dictdiffer.utils import RecordMatcher
+        >>> matcher = RecordMatcher('id')
+        >>> alignment = matcher.match([{'id': 1}, {'id': 2}],
+        ...                           [{'id': 2}, {'id': 1}])
+        >>> alignment.pairs
+        ((0, 1), (1, 0))
+        >>> alignment.mapping
+        {0: 1, 1: 0}
+        >>> alignment = matcher.match([{'id': 1, 'v': 'a'}],
+        ...                           [{'id': 1, 'v': 'a'},
+        ...                            {'id': 1, 'v': 'a'}])
+        >>> alignment
+        Alignment(pairs=((0, 0),), removed=(), added=(1,))
+    """
+
+    def __init__(self, identity, field_cost=None, default_cost=1.0,
+                 exhaustive_limit=8):
+        """Initialize the record matcher.
+
+        :param identity: Field name or iterable of field names identifying
+                         a record.  Records missing any of the fields are
+                         never matched.
+        :param field_cost: Mapping of field name to difference cost, or a
+                           callable ``(field, old_value, new_value) -> cost``.
+                           Fields not present in a mapping are charged
+                           ``default_cost``.
+        :param default_cost: Cost of a differing field not covered by
+                             ``field_cost``.
+        :param exhaustive_limit: Maximum group size for which the pairing
+                                 is verified by exhaustive search.  Larger
+                                 groups fall back to a deterministic greedy
+                                 assignment.
+        """
+        if isinstance(identity, str):
+            identity = (identity,)
+        self.identity = tuple(identity)
+        self.field_cost = field_cost
+        self.default_cost = default_cost
+        self.exhaustive_limit = exhaustive_limit
+        self.mappings = {}
+
+    def _identity_key(self, record):
+        """Return the hashable identity key of a record or None."""
+        key = []
+        for field in self.identity:
+            value = record.get(field, _MISSING)
+            if value is _MISSING:
+                return None
+            key.append(value)
+        try:
+            hash(tuple(key))
+        except TypeError:
+            return None
+        return tuple(key)
+
+    def _field_cost(self, field, first_value, second_value):
+        """Return the difference cost of one field."""
+        if self.field_cost is None:
+            return self.default_cost
+        if callable(self.field_cost):
+            return self.field_cost(field, first_value, second_value)
+        return self.field_cost.get(field, self.default_cost)
+
+    def _pair_cost(self, first_record, second_record):
+        """Return the total field difference cost of pairing two records."""
+        cost = 0.0
+        for field in set(first_record) | set(second_record):
+            first_value = first_record.get(field, _MISSING)
+            second_value = second_record.get(field, _MISSING)
+            if first_value is _MISSING or second_value is _MISSING or \
+                    first_value != second_value:
+                cost += self._field_cost(field, first_value, second_value)
+        return cost
+
+    def _match_group(self, first_records, second_records):
+        """Return the minimum cost pairs of one identity group."""
+        size_first = len(first_records)
+        size_second = len(second_records)
+        costs = [[self._pair_cost(first_records[i], second_records[j])
+                  for j in range(size_second)] for i in range(size_first)]
+        if min(size_first, size_second) <= self.exhaustive_limit:
+            return _exhaustive_assignment(costs, size_first, size_second)
+        return _greedy_assignment(costs, size_first, size_second)
+
+    def match(self, first, second):
+        """Align the records of two lists.
+
+        :param first: List of record dictionaries.
+        :param second: List of record dictionaries.
+        :returns: An :class:`Alignment` with the matched ``pairs`` and the
+                  ``removed`` and ``added`` indices without a match.
+        """
+        first_groups = {}
+        second_groups = {}
+        for index, record in enumerate(first):
+            key = self._identity_key(record)
+            if key is not None:
+                first_groups.setdefault(key, []).append(index)
+        for index, record in enumerate(second):
+            key = self._identity_key(record)
+            if key is not None:
+                second_groups.setdefault(key, []).append(index)
+
+        pairs = []
+        keys = list(first_groups) + \
+            [key for key in second_groups if key not in first_groups]
+        for key in keys:
+            first_indices = first_groups.get(key, [])
+            second_indices = second_groups.get(key, [])
+            group_pairs = self._match_group(
+                [first[i] for i in first_indices],
+                [second[j] for j in second_indices])
+            pairs.extend((first_indices[i], second_indices[j])
+                         for i, j in group_pairs)
+
+        pairs.sort()
+        matched_first = set(i for i, _ in pairs)
+        matched_second = set(j for _, j in pairs)
+        removed = tuple(i for i in range(len(first)) if i not in matched_first)
+        added = tuple(j for j in range(len(second)) if j not in matched_second)
+        return Alignment(tuple(pairs), removed, added)

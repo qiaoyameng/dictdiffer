@@ -1,6 +1,11 @@
 Changes
 =======
 
+Version 0.10.1 (released TBD)
+
+- diff: add optional `record_matcher` parameter aligning lists of record
+  dictionaries by identity fields with a minimum cost pairing
+
 Version v0.10.0 (released 2026-07-16)
 
 - chore(setup): migrate from setuptools to hatchling
