@@ -98,6 +98,26 @@ Let's revert the last changes:
     reverted = revert(result, patched)
     assert reverted == first
 
+Two consecutive patches can be composed without keeping the intermediate
+document.  This is useful when only a net A-to-C patch should be stored:
+
+.. code-block:: python
+
+    from dictdiffer import compose, patch, revert
+
+    first_patch = list(diff(first, second))
+    second_patch = list(diff(second, third))
+
+    net_patch = compose(first_patch, second_patch)
+
+    assert patch(net_patch, first) == patch(
+        second_patch, patch(first_patch, first))
+    assert revert(net_patch, third) == first
+
+Contradictory old values, missing paths, invalid list positions and invalid
+set preconditions raise ``PatchCompositionError`` while the two patches are
+being composed; the source documents are never modified.
+
 A tolerance can be used to consider closed values as equal.
 The tolerance parameter only applies for int and float.
 

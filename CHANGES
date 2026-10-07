@@ -1,6 +1,12 @@
 Changes
 =======
 
+Unreleased
+----------
+
+- compose: add symbolic composition of consecutive patches without requiring
+  the source, intermediate and target documents
+
 Version v0.10.0 (released 2026-07-16)
 
 - chore(setup): migrate from setuptools to hatchling

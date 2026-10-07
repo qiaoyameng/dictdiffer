@@ -10,11 +10,13 @@ from copy import deepcopy
 
 from .utils import EPSILON, PathLimit, are_different, dot_lookup
 from .version import __version__
+from .compose import PatchCompositionError, compose
 
 (ADD, REMOVE, CHANGE) = (
     'add', 'remove', 'change')
 
-__all__ = ('diff', 'patch', 'swap', 'revert', 'dot_lookup', '__version__')
+__all__ = ('compose', 'diff', 'patch', 'swap', 'revert', 'dot_lookup',
+           'PatchCompositionError', '__version__')
 
 DICT_TYPES = (MutableMapping, )
 LIST_TYPES = (MutableSequence, )
@@ -357,7 +359,7 @@ def swap(diff_result):
         return REMOVE, node, list(reversed(changes))
 
     def remove(node, changes):
-        return ADD, node, changes
+        return ADD, node, sorted(changes, key=lambda item: item[0])
 
     def change(node, changes):
         first, second = changes
@@ -369,8 +371,11 @@ def swap(diff_result):
         CHANGE: change
     }
 
-    for action, node, change in diff_result:
-        yield swappers[action](node, change)
+    patches = list(diff_result)
+    for action in (ADD, REMOVE, CHANGE):
+        for action_name, node, change in reversed([
+                item for item in patches if item[0] == action]):
+            yield swappers[action_name](node, change)
 
 
 def revert(diff_result, destination, in_place=False):
