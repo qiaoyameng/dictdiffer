@@ -1,6 +1,15 @@
 Changes
 =======
 
+Version v0.11.0 (unreleased)
+
+- compose: add ``compose`` to merge two consecutive patches (``A -> B`` and
+  ``B -> C``) into one net ``A -> C`` patch without the intermediate
+  document; handles dictionary sub-paths, list index drift and sets, cancels
+  add-then-delete / change-then-revert, and raises ``ComposeConflict`` on
+  contradictory preconditions
+
+
 Version v0.10.0 (released 2026-07-16)
 
 - chore(setup): migrate from setuptools to hatchling

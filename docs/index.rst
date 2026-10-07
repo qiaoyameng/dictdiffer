@@ -98,6 +98,55 @@ Let's revert the last changes:
     reverted = revert(result, patched)
     assert reverted == first
 
+Composing patches
+=================
+
+If you store only the net change between two states but happen to hold two
+consecutive patches (``A -> B`` and ``B -> C``), :func:`.compose` merges them
+into a single patch that takes *A* directly to *C*. The intermediate document
+*B* is not required - only the values carried by the two patches are used.
+
+.. code-block:: python
+
+    from dictdiffer import compose
+
+    first = {'a': 1, 'l': [1, 2], 's': {1}}
+    middle = {'a': 2, 'l': [1, 2, 3], 's': {1, 2}}
+    third = {'a': 2, 'l': [1, 2, 3], 's': {1, 2}}
+
+    net = compose(diff(first, middle), diff(middle, third))
+
+    assert patch(net, first) == third
+
+The composition is purely symbolic and minimal:
+
+* an addition that is later deleted (or a modification that is later
+  reverted) is dropped from the net patch;
+* list insertions and deletions are merged while compensating for the index
+  drift they cause (a delete followed by an append at the freed position
+  becomes a ``change``);
+* ``set`` add/remove operations are merged element by element;
+* dictionary edits at arbitrary sub-paths are combined recursively.
+
+The resulting patch keeps the original *A* values on every ``change`` and
+``remove`` item, so it can be reverted to recover *A*:
+
+.. code-block:: python
+
+    assert revert(net, third) == first
+
+When the second patch assumes an old value or a structure that the first
+patch does not leave behind (e.g. it modifies a key that was removed, or
+expects another old value), :class:`.ComposeConflict` is raised before any
+partial result is produced, instead of failing halfway with a ``KeyError``.
+
+Patches produced by ``diff`` (including the ``expand=True`` and
+``path_limit`` forms) are supported. The only inherent ambiguity is the
+single ``('add', node, [(0, a_set)])`` tuple, which cannot distinguish a set
+mutation from an empty list that receives one ``set`` element; compose treats
+it as a set mutation unless the other patch provides evidence to the
+contrary.
+
 A tolerance can be used to consider closed values as equal.
 The tolerance parameter only applies for int and float.
 

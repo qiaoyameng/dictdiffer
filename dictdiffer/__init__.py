@@ -14,7 +14,9 @@ from .version import __version__
 (ADD, REMOVE, CHANGE) = (
     'add', 'remove', 'change')
 
-__all__ = ('diff', 'patch', 'swap', 'revert', 'dot_lookup', '__version__')
+__all__ = ('diff', 'patch', 'swap', 'revert', 'compose',
+           'ComposeError', 'ComposeConflict', 'UncomposablePatchError',
+           'InvalidPatchError', 'dot_lookup', '__version__')
 
 DICT_TYPES = (MutableMapping, )
 LIST_TYPES = (MutableSequence, )
@@ -393,3 +395,12 @@ def revert(diff_result, destination, in_place=False):
                      and return the destination structure.
     """
     return patch(swap(diff_result), destination, in_place)
+
+# Imported last to avoid a circular import (dictdiffer.compose imports patch).
+from .compose import (  # noqa: E402
+    compose,
+    ComposeError,
+    ComposeConflict,
+    UncomposablePatchError,
+    InvalidPatchError,
+)
