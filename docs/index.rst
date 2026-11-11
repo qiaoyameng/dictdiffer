@@ -120,6 +120,67 @@ Now with a tolerance of 1%:
 
     assert list(result) == ('change', 'a', (10.0, 10.5))
 
+The global tolerance is often too coarse when different fields need
+different rules. Numeric comparison strategies can be bound to structured
+paths with the ``tolerances`` parameter. Each strategy configures an
+absolute tolerance, a relative tolerance and the NaN handling
+independently, and applies to ``int``, ``float`` and
+``decimal.Decimal`` values (``bool`` is never treated as a number):
+
+.. code-block:: python
+
+    from dictdiffer import NumericTolerance
+
+    first = {'price': 100.0, 'sensor': {'temp': 20.001}}
+    second = {'price': 100.4, 'sensor': {'temp': 20.002}}
+
+    result = diff(first, second, tolerances={
+        ('price',): NumericTolerance(rel_tol=0.001),
+        ('sensor', '*'): NumericTolerance(abs_tol=0.01),
+    })
+
+    assert list(result) == [('change', 'price', (100.0, 100.4))]
+
+Paths support the ``+`` (single level) and ``*`` (everything that
+follows) wildcards. Exact paths take precedence over ``+``, and ``+``
+over ``*``. Special values follow explicit rules: signed zeros compare
+equal, NaN equals NaN unless ``nan_equal=False``, and infinities are only
+equal to an infinity of the same sign. Missing fields are always
+reported as ``add``/``remove`` regardless of tolerance, and retained
+``change`` operations keep the actual target values - tolerance never
+rounds the business data.
+
+An optional report of the changes suppressed by tolerance can be
+collected in a list passed as ``ignored_report``. Each entry is a
+``(node, (old_value, new_value), strategy)`` tuple:
+
+.. code-block:: python
+
+    report = []
+    result = diff(first, second,
+                  tolerances={('sensor', '*'): NumericTolerance(abs_tol=0.01)},
+                  ignored_report=report)
+
+    assert result == [('change', 'price', (100.0, 100.4))]
+    assert report[0][0] == 'sensor.temp'
+    assert report[0][1] == (20.001, 20.002)
+
+The same strategies can be handed to the ``Merger`` so that a value
+considered unchanged by the diff can never raise a merge conflict:
+
+.. code-block:: python
+
+    from dictdiffer.merge import Merger
+
+    lca = {'price': 100.0, 'sensor': {'temp': 20.001}}
+    first = {'price': 100.4, 'sensor': {'temp': 20.002}}
+    second = {'price': 100.0, 'sensor': {'temp': 20.003}}
+
+    m = Merger(lca, first, second, {}, tolerances={
+        ('sensor', '*'): NumericTolerance(abs_tol=0.01),
+    })
+    m.run()
+
 API
 ===
 

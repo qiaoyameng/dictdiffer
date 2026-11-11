@@ -3,14 +3,17 @@
 # SPDX-FileCopyrightText: 2017-2019 ETH Zurich, Swiss Data Science Center, Jiri Kuncar.
 # SPDX-License-Identifier: MIT
 
+import math
 import unittest
 from collections import OrderedDict
 from collections.abc import MutableMapping, MutableSequence
+from decimal import Decimal, localcontext
 
 import pytest
 
-from dictdiffer import HAS_NUMPY, diff, dot_lookup, patch, revert, swap
-from dictdiffer.utils import PathLimit
+from dictdiffer import (HAS_NUMPY, NumericTolerance, diff, dot_lookup,
+                        patch, revert, swap)
+from dictdiffer.utils import PathLimit, ToleranceMap
 
 
 class DictDifferTests(unittest.TestCase):
@@ -718,6 +721,365 @@ class SwapperTests(unittest.TestCase):
         second = [1, 2, 3]
         result = list(diff(first, second))
         assert first == revert(result, second)
+
+
+class ToleranceMapTest(unittest.TestCase):
+    def test_strategy_validation(self):
+        for bad in (-1, '1', object()):
+            with pytest.raises(ValueError if isinstance(bad, int)
+                               else TypeError):
+                NumericTolerance(abs_tol=bad)
+        with pytest.raises(TypeError):
+            NumericTolerance(abs_tol=True)
+        with pytest.raises(TypeError):
+            NumericTolerance(abs_tol=1, nope=True)
+        with pytest.raises(ValueError):
+            NumericTolerance(rel_tol=float('nan'))
+        with pytest.raises(ValueError):
+            NumericTolerance(abs_tol=Decimal('NaN'))
+        # infinite tolerances are allowed
+        NumericTolerance(abs_tol=float('inf'))
+
+    def test_path_validation(self):
+        with pytest.raises(TypeError):
+            ToleranceMap({'a': NumericTolerance(abs_tol=1)})
+        with pytest.raises(TypeError):
+            ToleranceMap({('a',): 'not-a-strategy'})
+        with pytest.raises(TypeError):
+            ToleranceMap({(): NumericTolerance(abs_tol=1)})
+
+    def test_dict_values_are_converted(self):
+        tm = ToleranceMap({('a',): {'abs_tol': 0.5}})
+        assert tm[('a',)].abs_tol == 0.5
+        assert isinstance(tm[('a',)], NumericTolerance)
+
+    def test_wildcard_priority(self):
+        tm = ToleranceMap({
+            ('x', '+'): NumericTolerance(abs_tol=1),
+            ('x', '*'): NumericTolerance(abs_tol=2),
+            ('x', 'a'): NumericTolerance(abs_tol=3),
+            ('x', 'a', '*'): NumericTolerance(abs_tol=4),
+        })
+        # exact > '+'
+        assert tm.query(('x', 'a')).abs_tol == 3
+        # '+' beats both '*' variants for a single unknown level
+        assert tm.query(('x', 'b')).abs_tol == 1
+        # longest '*' prefix wins
+        assert tm.query(('x', 'a', 'b')).abs_tol == 4
+        assert tm.query(('x', 'b', 'c')).abs_tol == 2
+
+    def test_validation_does_not_traverse_business_objects(self):
+        class Untraversable(object):
+            def __eq__(self, other):
+                raise AssertionError('business object was compared')
+
+            def __iter__(self):
+                raise AssertionError('business object was traversed')
+
+            def __getitem__(self, key):
+                raise AssertionError('business object was traversed')
+
+        # Invalid strategies are rejected eagerly, before any business
+        # object is inspected.
+        with pytest.raises(TypeError):
+            diff(Untraversable(), Untraversable(),
+                 tolerances={('payload',): 'bad-strategy'})
+        with pytest.raises(TypeError):
+            diff(Untraversable(), Untraversable(),
+                 tolerances={'payload': NumericTolerance(abs_tol=1)})
+
+
+class NumericToleranceDiffTest(unittest.TestCase):
+    def test_amount_and_sensor_use_separate_strategies(self):
+        first = {
+            'amount': {'value': 100.00},
+            'sensor': {'value': 20.0001},
+        }
+        second = {
+            'amount': {'value': 100.05},
+            'sensor': {'value': 20.0004},
+        }
+        result = list(diff(first, second, tolerances={
+            ('amount', 'value'): NumericTolerance(abs_tol=Decimal('0.01')),
+            ('sensor', 'value'): NumericTolerance(abs_tol=Decimal('0.001')),
+        }))
+        assert result == [('change', 'amount.value',
+                           (100.00, 100.05))]
+
+    def test_absolute_and_relative_tolerance(self):
+        strategy = NumericTolerance(abs_tol=0.25, rel_tol=0.001)
+        # boundary: exactly at abs_tol -> unchanged
+        assert list(diff({'a': 10.0}, {'a': 10.25},
+                         tolerances={('a',): strategy})) == []
+        # just above abs_tol -> change
+        assert list(diff({'a': 10.0}, {'a': 10.26},
+                         tolerances={('a',): strategy})) == [
+            ('change', 'a', (10.0, 10.26))]
+        # relative tolerance dominates for large values
+        assert list(diff({'a': 1000.0}, {'a': 1000.8},
+                         tolerances={
+                             ('a',): NumericTolerance(rel_tol=0.001),
+                         })) == []
+        assert list(diff({'a': 1000.0}, {'a': 1001.1},
+                         tolerances={
+                             ('a',): NumericTolerance(rel_tol=0.001),
+                         })) == [
+            ('change', 'a', (1000.0, 1001.1))]
+
+    def test_int_support(self):
+        assert list(diff({'a': 100}, {'a': 101},
+                         tolerances={
+                             ('a',): NumericTolerance(abs_tol=1),
+                         })) == []
+        assert list(diff({'a': 100}, {'a': 102},
+                         tolerances={
+                             ('a',): NumericTolerance(abs_tol=1),
+                         })) == [('change', 'a', (100, 102))]
+
+    def test_decimal_support(self):
+        strategy = NumericTolerance(abs_tol=Decimal('0.05'),
+                                    rel_tol=Decimal('0.001'))
+        assert list(diff({'a': Decimal('10.00')},
+                         {'a': Decimal('10.05')},
+                         tolerances={('a',): strategy})) == []
+        assert list(diff({'a': Decimal('10.00')},
+                         {'a': Decimal('10.06')},
+                         tolerances={('a',): strategy})) == [
+            ('change', 'a', (Decimal('10.00'), Decimal('10.06')))]
+        # mixed float tolerance values are coerced for Decimal operands
+        assert list(diff({'a': Decimal('10.00')},
+                         {'a': Decimal('10.04')},
+                         tolerances={
+                             ('a',): NumericTolerance(abs_tol=0.05),
+                         })) == []
+
+    def test_bool_is_not_a_number(self):
+        assert list(diff({'a': True}, {'a': 1},
+                         tolerances={
+                             ('a',): NumericTolerance(abs_tol=100),
+                         })) == [('change', 'a', (True, 1))]
+        assert list(diff({'a': True}, {'a': 1.0},
+                         tolerance=10, absolute_tolerance=10)) == [
+            ('change', 'a', (True, 1.0))]
+        assert list(diff({'a': False}, {'a': False},
+                         tolerances={
+                             ('a',): NumericTolerance(abs_tol=100),
+                         })) == []
+
+    def test_special_values(self):
+        # signed zeros are equal
+        assert list(diff({'a': 0.0}, {'a': -0.0})) == []
+        assert list(diff({'a': 0.0}, {'a': -0.0},
+                         tolerances={
+                             ('a',): NumericTolerance(abs_tol=0),
+                         })) == []
+        # NaN versus NaN follows nan_equal (default: equal)
+        assert list(diff({'a': float('nan')}, {'a': float('nan')})) == []
+        assert list(diff({'a': float('nan')}, {'a': float('nan')},
+                         tolerances={
+                             ('a',): NumericTolerance(nan_equal=True),
+                         })) == []
+        result = list(diff({'a': float('nan')}, {'a': float('nan')},
+                           tolerances={
+                               ('a',): NumericTolerance(nan_equal=False),
+                           }))
+        assert len(result) == 1
+        action, node, values = result[0]
+        assert (action, node) == ('change', 'a')
+        assert math.isnan(values[0]) and math.isnan(values[1])
+        # NaN versus a number is always a change, tolerance cannot hide it
+        result = list(diff({'a': float('nan')}, {'a': 1.0},
+                           tolerances={
+                               ('a',): NumericTolerance(abs_tol=1e9),
+                           }))
+        assert len(result) == 1
+        action, node, values = result[0]
+        assert (action, node) == ('change', 'a')
+        assert math.isnan(values[0]) and values[1] == 1.0
+        # same-sign infinities equal, opposite signs differ
+        assert list(diff({'a': float('inf')}, {'a': float('inf')})) == []
+        assert list(diff({'a': float('-inf')},
+                         {'a': float('-inf')})) == []
+        assert list(diff({'a': float('inf')},
+                         {'a': float('-inf')})) == [
+            ('change', 'a', (float('inf'), float('-inf')))]
+        # infinity never within tolerance of a finite value
+        assert list(diff({'a': float('inf')}, {'a': 1e308},
+                         tolerances={
+                             ('a',): NumericTolerance(rel_tol=1.0),
+                         })) == [('change', 'a', (float('inf'), 1e308))]
+
+    def test_decimal_special_values(self):
+        nan = Decimal('NaN')
+        inf = Decimal('Infinity')
+        assert list(diff({'a': nan}, {'a': nan})) == []
+        assert list(diff({'a': nan}, {'a': nan},
+                         tolerances={
+                             ('a',): NumericTolerance(nan_equal=False),
+                         })) == [('change', 'a', (nan, nan))]
+        assert list(diff({'a': inf}, {'a': inf})) == []
+        assert list(diff({'a': inf}, {'a': -inf})) == [
+            ('change', 'a', (inf, -inf))]
+        assert list(diff({'a': inf}, {'a': Decimal('1e300')},
+                         tolerances={
+                             ('a',): NumericTolerance(rel_tol=1.0),
+                         })) == [('change', 'a', (inf, Decimal('1e300')))]
+        # signed zeros, also for Decimal
+        assert list(diff({'a': Decimal('0')}, {'a': Decimal('-0')})) == []
+        # int/float and int/Decimal pairs compare numerically
+        assert list(diff({'a': 10}, {'a': 10.05},
+                         tolerances={
+                             ('a',): NumericTolerance(abs_tol=0.1),
+                         })) == []
+        assert list(diff({'a': 10}, {'a': Decimal('10.05')},
+                         tolerances={
+                             ('a',): NumericTolerance(abs_tol=Decimal('0.1')),
+                         })) == []
+        # missing fields stay add/remove, never tolerance-suppressed
+        assert list(diff({}, {'a': Decimal('1.0')},
+                         tolerances={
+                             ('a',): NumericTolerance(abs_tol=10),
+                         })) == [('add', '', [('a', Decimal('1.0'))])]
+        assert list(diff({'a': Decimal('1.0')}, {},
+                         tolerances={
+                             ('a',): NumericTolerance(abs_tol=10),
+                         })) == [
+            ('remove', '', [('a', Decimal('1.0'))])]
+
+    def test_missing_field_is_not_suppressed(self):
+        tolerances = {('a',): NumericTolerance(abs_tol=100)}
+        assert list(diff({'b': 1}, {'b': 2, 'a': 5}, tolerances=tolerances)) \
+            == [('change', 'b', (1, 2)), ('add', '', [('a', 5)])]
+        assert list(diff({'a': 5, 'b': 1}, {'b': 2},
+                         tolerances=tolerances)) == [
+            ('change', 'b', (1, 2)), ('remove', '', [('a', 5)])]
+
+    def test_non_numeric_values_ignored_strategy(self):
+        tolerances = {('*',): NumericTolerance(abs_tol=100)}
+        assert list(diff({'a': 'x'}, {'a': 'y'}, tolerances=tolerances)) \
+            == [('change', 'a', ('x', 'y'))]
+        assert list(diff({'a': None}, {'a': 0}, tolerances=tolerances)) \
+            == [('change', 'a', (None, 0))]
+
+    def test_strategy_wins_over_global_tolerance(self):
+        # The global tolerance would suppress this change; the path
+        # strategy is stricter and keeps it.
+        assert list(diff({'a': 10.0}, {'a': 10.5},
+                         tolerance=0.1,
+                         tolerances={
+                             ('a',): NumericTolerance(abs_tol=0.01),
+                         })) == [('change', 'a', (10.0, 10.5))]
+
+    def test_unmatched_path_uses_global_tolerance(self):
+        assert list(diff({'a': 10.0}, {'a': 10.5},
+                         tolerance=0.1,
+                         tolerances={
+                             ('b',): NumericTolerance(abs_tol=0.01),
+                         })) == []
+
+    def test_ignored_report(self):
+        report = []
+        result = list(diff({'a': 10.0, 'b': 1.0},
+                          {'a': 10.5, 'b': 2.0},
+                          tolerances={
+                              ('a',): NumericTolerance(abs_tol=1),
+                              ('b',): NumericTolerance(abs_tol=0),
+                          },
+                          ignored_report=report))
+        assert result == [('change', 'b', (1.0, 2.0))]
+        assert len(report) == 1
+        node, values, strategy = report[0]
+        assert node == 'a'
+        assert values == (10.0, 10.5)
+        assert strategy.abs_tol == 1
+        # the report holds copies, not references into the inputs
+        first = {'a': 10.0}
+        second = {'a': 10.4}
+        report = []
+        list(diff(first, second,
+                  tolerances={('a',): NumericTolerance(abs_tol=1)},
+                  ignored_report=report))
+        second['a'] = 99.0
+        assert report[0][1] == (10.0, 10.4)
+
+    def test_no_report_for_unmatched_or_non_numeric(self):
+        report = []
+        list(diff({'a': 10.0, 'b': 'x'}, {'a': 10.5, 'b': 'y'},
+                  tolerance=0.1,
+                  tolerances={('b',): NumericTolerance(abs_tol=1)},
+                  ignored_report=report))
+        assert report == []
+
+    def test_no_report_for_exact_numeric_equality(self):
+        report = []
+        assert list(diff({'a': 1}, {'a': 1.0},
+                         tolerances={('a',): NumericTolerance(abs_tol=1)},
+                         ignored_report=report)) == []
+        assert report == []
+
+    def test_change_keeps_actual_target_value(self):
+        first = {'a': Decimal('1.234567')}
+        second = {'a': Decimal('1.234568')}
+        result = list(diff(first, second,
+                           tolerances={
+                               ('a',): NumericTolerance(
+                                   abs_tol=Decimal('0.0000001')),
+                           }))
+        assert result == [('change', 'a',
+                           (Decimal('1.234567'), Decimal('1.234568')))]
+        patched = patch(result, first)
+        assert patched == second
+        assert patched['a'] == Decimal('1.234568')
+        assert patched['a'].as_tuple() == Decimal('1.234568').as_tuple()
+
+
+class LowDecimalPrecisionToleranceTest(unittest.TestCase):
+    def test_low_precision_diff_and_patch(self):
+        with localcontext() as ctx:
+            ctx.prec = 4
+            strategy = NumericTolerance(abs_tol=Decimal('0.5'))
+            first = {'value': Decimal('1.000')}
+            second = {'value': Decimal('1.400')}
+            assert list(diff(first, second,
+                             tolerances={('value',): strategy})) == []
+            # beyond the threshold the change is reported with the
+            # unrounded values and patched verbatim
+            second = {'value': Decimal('1.600')}
+            result = list(diff(first, second,
+                               tolerances={('value',): strategy}))
+            assert result == [('change', 'value',
+                               (Decimal('1.000'), Decimal('1.600')))]
+            assert patch(result, first)['value'] == Decimal('1.600')
+
+    def test_low_precision_threshold_boundary(self):
+        with localcontext() as ctx:
+            ctx.prec = 3
+            first = {'v': Decimal('9.99')}
+            # 9.99 + 0.01 == 10.0 at prec 3, exactly at abs_tol
+            assert list(diff(first, {'v': Decimal('10.0')},
+                             tolerances={
+                                 ('v',): NumericTolerance(
+                                     abs_tol=Decimal('0.01')),
+                             })) == []
+            assert list(diff(first, {'v': Decimal('10.1')},
+                             tolerances={
+                                 ('v',): NumericTolerance(
+                                     abs_tol=Decimal('0.01')),
+                             })) == [
+                ('change', 'v', (Decimal('9.99'), Decimal('10.1')))]
+
+    def test_low_precision_relative_boundary(self):
+        with localcontext() as ctx:
+            ctx.prec = 4
+            strategy = NumericTolerance(rel_tol=Decimal('0.01'))
+            # rel boundary: 1% of 100.0 == 1.0
+            assert list(diff({'v': Decimal('100.0')},
+                             {'v': Decimal('101.0')},
+                             tolerances={('v',): strategy})) == []
+            assert list(diff({'v': Decimal('100.0')},
+                             {'v': Decimal('101.1')},
+                             tolerances={('v',): strategy})) == [
+                ('change', 'v', (Decimal('100.0'), Decimal('101.1')))]
 
 
 class DotLookupTest(unittest.TestCase):

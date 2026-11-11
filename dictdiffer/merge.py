@@ -8,7 +8,7 @@ from . import diff
 from .conflict import ConflictFinder
 from .resolve import Resolver, UnresolvedConflictsException
 from .unify import Unifier
-from .utils import PathLimit
+from .utils import PathLimit, ToleranceMap
 
 
 class Merger(object):
@@ -32,7 +32,8 @@ class Merger(object):
 
     def __init__(self,
                  lca, first, second, actions,
-                 path_limits=[], additional_info=None, ignore=None):
+                 path_limits=[], additional_info=None, ignore=None,
+                 tolerances=None):
         """Initialize the Merger object.
 
         :param lca: latest common ancestor of the two diverging data structures
@@ -43,12 +44,21 @@ class Merger(object):
         :param additional_info: Any object containing additional information
                                 used by the resolution functions
         :param ignore: Set of keys that should not be merged
+        :param tolerances: A ToleranceMap or a dictionary mapping structured
+                           path tuples to NumericTolerance strategies. The
+                           same strategies are applied to both sides of the
+                           merge, so a value considered unchanged by the diff
+                           can never produce a merge conflict.
         """
         self.lca = lca
         self.first = first
         self.second = second
         self.path_limit = PathLimit(path_limits)
         self.ignore = ignore
+        if tolerances is not None and not isinstance(tolerances,
+                                                      ToleranceMap):
+            tolerances = ToleranceMap(dict(tolerances))
+        self.tolerances = tolerances
 
         self.actions = actions
         self.additional_info = additional_info
@@ -102,11 +112,13 @@ class Merger(object):
         self.first_patches = list(diff(self.lca, self.first,
                                        path_limit=self.path_limit,
                                        ignore=self.ignore,
-                                       expand=True))
+                                       expand=True,
+                                       tolerances=self.tolerances))
         self.second_patches = list(diff(self.lca, self.second,
                                         path_limit=self.path_limit,
                                         ignore=self.ignore,
-                                        expand=True))
+                                        expand=True,
+                                        tolerances=self.tolerances))
 
     def find_conflicts(self):
         """Find conflicts between the tow lists of patches.

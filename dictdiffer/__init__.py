@@ -8,13 +8,15 @@
 from collections.abc import Iterable, MutableMapping, MutableSequence, MutableSet
 from copy import deepcopy
 
-from .utils import EPSILON, PathLimit, are_different, dot_lookup
+from .utils import (EPSILON, NumericTolerance, PathLimit, ToleranceMap,
+                    are_different, dot_lookup, is_number)
 from .version import __version__
 
 (ADD, REMOVE, CHANGE) = (
     'add', 'remove', 'change')
 
-__all__ = ('diff', 'patch', 'swap', 'revert', 'dot_lookup', '__version__')
+__all__ = ('diff', 'patch', 'swap', 'revert', 'dot_lookup',
+           'NumericTolerance', 'ToleranceMap', '__version__')
 
 DICT_TYPES = (MutableMapping, )
 LIST_TYPES = (MutableSequence, )
@@ -29,7 +31,8 @@ except ImportError:  # pragma: no cover
 
 
 def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
-         tolerance=EPSILON, absolute_tolerance=None, dot_notation=True):
+         tolerance=EPSILON, absolute_tolerance=None, dot_notation=True,
+         tolerances=None, ignored_report=None):
     """Compare two dictionary/list/set objects, and returns a diff result.
 
     Return an iterator with differences between two objects. The diff items
@@ -89,6 +92,16 @@ def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
     ... dot_notation=False))
     [('change', ['a', 'x'], (1, 2))]
 
+    Numeric comparison strategies can be bound to structured paths:
+
+    >>> from dictdiffer import NumericTolerance
+    >>> first = {'price': 100.0, 'sensor': {'temp': 20.001}}
+    >>> second = {'price': 100.4, 'sensor': {'temp': 20.002}}
+    >>> list(diff(first, second, tolerances={
+    ...     ('price',): NumericTolerance(rel_tol=0.001),
+    ...     ('sensor', '*'): NumericTolerance(abs_tol=0.01)}))
+    [('change', 'price', (100.0, 100.4))]
+
     :param first: The original dictionary, ``list`` or ``set``.
     :param second: New dictionary, ``list`` or ``set``.
     :param node: Key for comparison that can be used in :func:`dot_lookup`.
@@ -102,6 +115,24 @@ def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
     :param absolute_tolerance: Absolute threshold to consider when comparing
                                two float numbers.
     :param dot_notation: Boolean to toggle dot notation on and off.
+    :param tolerances: A :class:`dictdiffer.utils.ToleranceMap` or a plain
+                       dictionary mapping structured path tuples to
+                       :class:`dictdiffer.utils.NumericTolerance` strategies.
+                       The ``+`` wildcard matches one path level and ``*``
+                       matches everything that follows; exact paths take
+                       precedence over ``+`` and ``+`` over ``*``. When a
+                       path matches, the global *tolerance* /
+                       *absolute_tolerance* arguments are ignored for it.
+                       Applies to ``int``, ``float`` and
+                       :class:`decimal.Decimal` values but never to
+                       ``bool``. Missing fields are still reported as
+                       ``add``/``remove`` regardless of tolerance.
+    :param ignored_report: Optional list. When given, every numeric change
+                           suppressed by a matching tolerance strategy is
+                           appended as
+                           ``(node, (old_value, new_value), strategy)``.
+                           The change is still omitted from the diff result
+                           and the business values are never rounded.
 
     .. versionchanged:: 0.3
        Added *ignore* parameter.
@@ -120,9 +151,17 @@ def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
 
     .. versionchanged:: 0.8
         Added *dot_notation* parameter.
+
+    .. versionchanged:: 0.11
+        Added *tolerances* and *ignored_report* parameters.
     """
     if path_limit is not None and not isinstance(path_limit, PathLimit):
         path_limit = PathLimit(path_limit)
+
+    # Validation happens here and inspects the strategies only; business
+    # objects are never traversed during strategy setup.
+    if tolerances is not None and not isinstance(tolerances, ToleranceMap):
+        tolerances = ToleranceMap(dict(tolerances))
 
     if isinstance(ignore, Iterable):
         def _process_ignore_value(value):
@@ -144,6 +183,39 @@ def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
             return '.'.join(node)
         else:
             return default_type(node)
+
+    def values_are_different(_first, _second, _node):
+        """Decide if two values differ, applying the path strategy.
+
+        This is the single decision used for the diff output, the
+        tolerance report and (through :class:`dictdiffer.merge.Merger`)
+        the merge conflict detection, so they can never disagree.
+        """
+        strategy = tolerances.query(tuple(_node)) \
+            if tolerances is not None else None
+        if strategy is not None:
+            if is_number(_first) and is_number(_second):
+                if not are_different(_first, _second, tolerance,
+                                     absolute_tolerance,
+                                     numeric_tolerance=strategy):
+                    # only differences that the tolerance actually
+                    # suppressed belong in the report, not exact
+                    # numeric equality such as 1 versus 1.0
+                    if ignored_report is not None and _first != _second:
+                        ignored_report.append((
+                            dotted(_node),
+                            (deepcopy(_first), deepcopy(_second)),
+                            strategy,
+                        ))
+                    return False
+            # non-numeric values fall back to plain equality; a bool
+            # must never be regarded as equal to a number even though
+            # Python's True == 1
+            if type(_first) is not type(_second) and (
+                    isinstance(_first, bool) or isinstance(_second, bool)):
+                return True
+            return _first != _second
+        return are_different(_first, _second, tolerance, absolute_tolerance)
 
     def _diff_recursive(_first, _second, _node=None):
         _node = _node or []
@@ -203,8 +275,9 @@ def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
                 # callees again diff function to compare.
                 # otherwise, the change will be handled as `change` flag.
                 if path_limit and path_limit.path_is_limit(_node + [key]):
-                    if _first[key] == _second[key]:
-                        return
+                    if not values_are_different(_first[key], _second[key],
+                                                _node + [key]):
+                        continue
 
                     yield CHANGE, _node + [key], (
                         deepcopy(_first[key]), deepcopy(_second[key])
@@ -271,7 +344,7 @@ def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,
 
         else:
             # Compare string and numerical types and yield `change` flag.
-            if are_different(_first, _second, tolerance, absolute_tolerance):
+            if values_are_different(_first, _second, _node):
                 yield CHANGE, dotted_node, (deepcopy(_first),
                                             deepcopy(_second))
 
