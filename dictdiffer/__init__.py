@@ -8,13 +8,30 @@
 from collections.abc import Iterable, MutableMapping, MutableSequence, MutableSet
 from copy import deepcopy
 
+from .serialize import (
+    PatchDecodeError,
+    PatchEncodeError,
+    decode_patch,
+    encode_patch,
+)
 from .utils import EPSILON, PathLimit, are_different, dot_lookup
 from .version import __version__
 
 (ADD, REMOVE, CHANGE) = (
     'add', 'remove', 'change')
 
-__all__ = ('diff', 'patch', 'swap', 'revert', 'dot_lookup', '__version__')
+__all__ = (
+    'diff',
+    'patch',
+    'swap',
+    'revert',
+    'dot_lookup',
+    'encode_patch',
+    'decode_patch',
+    'PatchEncodeError',
+    'PatchDecodeError',
+    '__version__',
+)
 
 DICT_TYPES = (MutableMapping, )
 LIST_TYPES = (MutableSequence, )

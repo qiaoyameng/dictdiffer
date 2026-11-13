@@ -1,6 +1,12 @@
 Changes
 =======
 
+Version 0.10.1 (unreleased)
+
+- serialize: add `encode_patch`/`decode_patch`, a versioned JSON message
+  format for patches with exact `Decimal`, `bytes`, `tuple`/`set` and
+  typed mapping keys, plus strict decoding budgets
+
 Version v0.10.0 (released 2026-07-16)
 
 - chore(setup): migrate from setuptools to hatchling
