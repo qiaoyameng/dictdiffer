@@ -120,6 +120,37 @@ Now with a tolerance of 1%:
 
     assert list(result) == ('change', 'a', (10.0, 10.5))
 
+Migrating patches after renaming fields
+=======================================
+
+When nested fields are renamed, patches accumulated against the old schema
+still point at the old paths. :func:`dictdiffer.migrate_patches` rewrites
+only the paths according to an explicit old-to-new mapping. Path segments
+keep their type (string keys and integer list indices), and every entry is
+interpreted against the original path, so parent migrations, name swaps and
+the most-specific-prefix rule all work:
+
+.. code-block:: python
+
+    from dictdiffer import diff, migrate_patches
+
+    mapping = {
+        ('profile', 'name'): ('identity', 'display_name'),
+    }
+
+    old_patches = list(diff(
+        {'profile': {'name': 'Ada'}},
+        {'profile': {'name': 'Grace'}},
+        dot_notation=False))
+
+    migrate_patches(old_patches, mapping)
+    # [('change', ['identity', 'display_name'], ('Ada', 'Grace'))]
+
+Ambiguous or context-losing mappings raise
+ :class:`dictdiffer.MigrationError` with one of the ``invalid_mapping``,
+``target_collision``, ``mapping_cycle`` or ``lost_context`` codes, before
+any migrated patch is returned.
+
 API
 ===
 

@@ -10,11 +10,20 @@ from copy import deepcopy
 
 from .utils import EPSILON, PathLimit, are_different, dot_lookup
 from .version import __version__
+from .migration import (
+    MigrationError,
+    migrate_document,
+    migrate_patch,
+    migrate_patches,
+)
 
 (ADD, REMOVE, CHANGE) = (
     'add', 'remove', 'change')
 
-__all__ = ('diff', 'patch', 'swap', 'revert', 'dot_lookup', '__version__')
+__all__ = (
+    'diff', 'patch', 'swap', 'revert', 'dot_lookup', 'migrate_patch',
+    'migrate_patches', 'migrate_document', 'MigrationError', '__version__',
+)
 
 DICT_TYPES = (MutableMapping, )
 LIST_TYPES = (MutableSequence, )

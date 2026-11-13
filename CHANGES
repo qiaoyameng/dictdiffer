@@ -1,6 +1,14 @@
 Changes
 =======
 
+Unreleased
+----------
+
+- migration: add `migrate_patches`, `migrate_patch` and
+  `migrate_document` to rewrite stored patch paths after nested field
+  renames, preserving string/integer segment types and diagnosing target
+  collisions, mapping cycles and lost context via `MigrationError`
+
 Version v0.10.0 (released 2026-07-16)
 
 - chore(setup): migrate from setuptools to hatchling
