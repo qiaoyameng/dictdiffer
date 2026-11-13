@@ -99,7 +99,7 @@ Let's revert the last changes:
     assert reverted == first
 
 A tolerance can be used to consider closed values as equal.
-The tolerance parameter only applies for int and float.
+The tolerance parameter applies to int, float and Decimal values.
 
 Let's try with a tolerance of 10% with the values 10 and 10.5:
 
@@ -120,10 +120,136 @@ Now with a tolerance of 1%:
 
     assert list(result) == ('change', 'a', (10.0, 10.5))
 
+Path-aware numeric policies
+---------------------------
+
+A single global tolerance is often wrong when one structure contains, for
+example, monetary amounts and sensor readings.
+:class:`dictdiffer.numeric.NumericPolicy` maps structured paths to independent
+:class:`dictdiffer.numeric.NumericRule` objects:
+
+.. code-block:: python
+
+    from decimal import Decimal
+
+    from dictdiffer import NumericPolicy, NumericRule, diff
+
+    policy = NumericPolicy({
+        ('amounts', '*'): NumericRule(
+            absolute_tolerance=Decimal('0.01'),
+            relative_tolerance=Decimal('0'),
+        ),
+        ('sensors', '*'): NumericRule(
+            absolute_tolerance=Decimal('0'),
+            relative_tolerance=Decimal('0.001'),
+        ),
+    })
+
+    first = {
+        'amounts': {'total': Decimal('10.000')},
+        'sensors': {'temperature': 100.0},
+    }
+    second = {
+        'amounts': {'total': Decimal('10.005')},
+        'sensors': {'temperature': 100.050},
+    }
+
+    assert list(diff(first, second, numeric_policy=policy)) == []
+
+Rules support ``int``, ``float`` and ``Decimal``.  Booleans are not numbers:
+``True`` is never treated as ``1``.  Comparison is performed with exact
+rational arithmetic, so a low-precision ``Decimal`` context cannot change a
+tolerance decision or round the values written by :func:`dictdiffer.patch`.
+
+Each rule configures these independent decisions:
+
+``absolute_tolerance``
+    The maximum absolute difference considered equal.
+
+``relative_tolerance``
+    The maximum difference relative to the largest absolute operand, using the
+    same scale as ``math.isclose``.
+
+``nan``
+    ``'equal'`` (default) treats two NaNs as equal; ``'unequal'`` treats every
+    pair involving a NaN as different; ``'ignore'`` treats any pair involving
+    a NaN as equal.
+
+``infinity``
+    ``'same-sign'`` (default) treats equally signed infinities as equal;
+    ``'equal'`` treats all infinities as equal; ``'unequal'`` treats all
+    infinities as different; ``'ignore'`` treats any pair involving infinity
+    as equal.
+
+``signed_zero``
+    ``'equal'`` (default) treats ``-0`` and ``+0`` as equal;
+    ``'distinguish'`` reports a change.
+
+``missing``
+    ``'diff'`` (default) reports a missing numeric field as an add/remove
+    operation.  ``'zero'`` treats the missing side as zero and suppresses the
+    operation when the present value is within tolerance of zero.
+
+Patterns are matched against structured paths, for example
+``('amounts', '*')``, or dotted strings such as ``'amounts.*'``.  ``*``
+matches one or more path components and ``+`` matches exactly one.  When
+several patterns match, precedence is deterministic: more literal
+components, then more ``+`` components, then fewer ``*`` components, then a
+longer pattern, then registration order.  An exact path always wins.
+
+Policy validation only inspects the policy description; it never walks the
+business objects that are later diffed.
+
+When a raw mapping is supplied, unmatched paths fall back to the legacy
+``tolerance``/``absolute_tolerance`` values.  A
+:class:`dictdiffer.numeric.NumericPolicy` uses its own ``default`` rule
+instead.
+
+An optional report lists changes that were ignored by a numeric rule:
+
+.. code-block:: python
+
+    result = diff(
+        first, second,
+        numeric_policy=policy,
+        report_ignored=True,
+    )
+    assert list(result) == []
+    ignored = result.ignored
+    assert ignored[0].path == ('amounts', 'total')
+    assert ignored[0].reason == 'within-absolute-tolerance'
+
+The report records the structured path, the matched wildcard pattern, the
+configured rule, the exact difference and the allowed threshold.  Reports can
+also be sent to a list or callback with ``ignored_changes=...``.
+
+The same policy can be supplied to ``dictdiffer.merge.Merger``.  Patch
+extraction and conflict detection then use the same numeric decision:
+
+.. code-block:: python
+
+    from dictdiffer.merge import Merger
+
+    merger = Merger(
+        lca, first, second, {},
+        numeric_policy=policy,
+        report_ignored=True,
+    )
+    merger.run()
+    assert merger.conflicts == []
+    assert merger.ignored_changes
+
+Changes that are kept still contain the actual target value.  Tolerance only
+decides whether a change is reported; it never rounds or rewrites business
+data.
+
 API
 ===
 
 .. automodule:: dictdiffer
+   :members:
+
+.. automodule:: dictdiffer.numeric
    :members:
 
 .. include:: ../CHANGES

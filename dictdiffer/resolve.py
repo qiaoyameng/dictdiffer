@@ -4,6 +4,8 @@
 
 """Sub module to handle the conflict resolution."""
 
+from .conflict import patches_equivalent
+from .numeric import coerce_numeric_policy, take_policy_alias
 from .utils import get_path
 
 
@@ -51,16 +53,24 @@ class Resolver(object):
     Presents the given conflicts to actions designed to solve them.
     """
 
-    def __init__(self, actions, additional_info=None):
+    def __init__(self, actions, additional_info=None, numeric_policy=None,
+                 **policy_aliases):
         """Initialize the Resolver.
 
         :param action: dict object containing the necessary resolution
                        functions
         :param additional_info: any additional information required by the
                                 actions
+        :param numeric_policy: optional numeric policy used for automatic
+                               conflict resolution decisions
         """
         self.actions = actions
         self.additional_info = additional_info
+        numeric_policy = take_policy_alias(numeric_policy, policy_aliases)
+        self.numeric_policy = (
+            coerce_numeric_policy(numeric_policy)
+            if numeric_policy is not None else None
+        )
 
         self.unresolved_conflicts = []
 
@@ -70,7 +80,14 @@ class Resolver(object):
         Method trying to auto resolve conflicts in case that the perform the
         same amendment.
         """
-        if conflict.first_patch == conflict.second_patch:
+        if self.numeric_policy is not None:
+            equivalent = patches_equivalent(
+                conflict.first_patch, conflict.second_patch,
+                self.numeric_policy,
+            )
+        else:
+            equivalent = conflict.first_patch == conflict.second_patch
+        if equivalent:
             conflict.take = 'f'
             return True
         return False

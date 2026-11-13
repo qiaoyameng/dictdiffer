@@ -1,6 +1,14 @@
 Changes
 =======
 
+Unreleased
+
+- diff/merge: add path-aware numeric comparison policies with independent
+  absolute and relative tolerances, explicit NaN/infinity/signed-zero/missing
+  handling, deterministic wildcard precedence, and an optional ignored-change
+  report.  Numeric comparison uses exact rational arithmetic so low-precision
+  Decimal contexts cannot change decisions or round patched values.
+
 Version v0.10.0 (released 2026-07-16)
 
 - chore(setup): migrate from setuptools to hatchling

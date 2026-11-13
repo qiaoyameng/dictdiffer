@@ -4,9 +4,10 @@
 
 """Utils gathers helper functions, classes for the dictdiffer module."""
 
-import math
 import sys
 from itertools import zip_longest
+
+from .numeric import NumericPolicy, NumericRule, coerce_numeric_policy
 
 num_types = int, float
 EPSILON = sys.float_info.epsilon
@@ -248,29 +249,28 @@ def dot_lookup(source, lookup, parent=False):
     return value
 
 
-def are_different(first, second, tolerance, absolute_tolerance=None):
+def are_different(first, second, tolerance, absolute_tolerance=None,
+                  numeric_policy=None, path=None):
     """Check if 2 values are different.
 
     In case of numerical values, the tolerance is used to check if the values
     are different.
     In all other cases, the difference is straight forward.
+
+    A :class:`dictdiffer.numeric.NumericPolicy` can be supplied to use a
+    path-aware comparison instead of the legacy global tolerances.
     """
-    if first == second:
-        # values are same - simple case
-        return False
-
-    first_is_nan, second_is_nan = bool(first != first), bool(second != second)
-
-    if first_is_nan or second_is_nan:
-        # two 'NaN' values are not different (see issue #114)
-        return not (first_is_nan and second_is_nan)
-    elif isinstance(first, num_types) and isinstance(second, num_types):
-        # two numerical values are compared with tolerance
-        return not math.isclose(
-            first,
-            second,
-            rel_tol=tolerance or 0,
-            abs_tol=absolute_tolerance or 0,
-        )
-    # we got different values
-    return True
+    if numeric_policy is not None:
+        if not isinstance(numeric_policy, NumericPolicy):
+            if not isinstance(numeric_policy, NumericRule) and \
+                    hasattr(numeric_policy, 'equal'):
+                return not numeric_policy.equal(
+                    path or (), first, second
+                )
+            numeric_policy = coerce_numeric_policy(numeric_policy)
+        return not numeric_policy.equal(path or (), first, second)
+    rule = NumericRule(
+        relative_tolerance=tolerance or 0,
+        absolute_tolerance=absolute_tolerance or 0,
+    )
+    return not rule.equal(first, second)
