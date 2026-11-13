@@ -8,13 +8,15 @@
 from collections.abc import Iterable, MutableMapping, MutableSequence, MutableSet
 from copy import deepcopy
 
+from .conflict import PatchConflict
 from .utils import EPSILON, PathLimit, are_different, dot_lookup
 from .version import __version__
 
 (ADD, REMOVE, CHANGE) = (
     'add', 'remove', 'change')
 
-__all__ = ('diff', 'patch', 'swap', 'revert', 'dot_lookup', '__version__')
+__all__ = ('diff', 'patch', 'checked_patch', 'swap', 'revert', 'dot_lookup',
+           'PatchConflict', 'PatchApplyError', '__version__')
 
 DICT_TYPES = (MutableMapping, )
 LIST_TYPES = (MutableSequence, )
@@ -26,6 +28,331 @@ try:
     LIST_TYPES += (numpy.ndarray, )
 except ImportError:  # pragma: no cover
     HAS_NUMPY = False
+
+
+class _Missing(object):
+    """Sentinel marking a value that is absent from the destination.
+
+    The ``None`` value is a perfectly valid dictionary value, therefore it
+    cannot be used to represent a missing path. Conflict reasons use this
+    sentinel instead, so that a missing value is never displayed as
+    ``None``.
+    """
+
+    def __repr__(self):
+        return '<missing>'
+
+
+MISSING = _Missing()
+
+
+class PatchApplyError(RuntimeError):
+    """Raised when a conflict-free patch cannot be applied.
+
+    All structural conflicts are reported *before* the destination is
+    modified, therefore this error can only be caused by a custom container
+    that cannot be deep copied for the check, or whose own mutating method
+    (``__setitem__``, ``insert``, ``__delitem__`` ...) raises when the
+    validated patch is applied in place. The structural check cannot undo
+    arbitrary external side effects performed by such a custom container.
+    """
+
+
+def _node_keys(node):
+    """Return the literal path components of a patch node.
+
+    String nodes keep the historical dot notation and are split on ``.``;
+    list/tuple nodes are taken literally, therefore a key containing dots is
+    never accidentally split.
+    """
+    if node is None or node == '' or node == []:
+        return []
+    if isinstance(node, str):
+        return node.split('.')
+    return list(node)
+
+
+def _canonical_path(node, key=MISSING):
+    """Build the canonical path tuple of a node and an optional last key."""
+    path = _node_keys(node)
+    if key is not MISSING:
+        path.append(key)
+    return tuple(path)
+
+
+def _traverse(destination, keys):
+    """Walk ``keys`` inside ``destination``.
+
+    Returns the parent container, the last key (already converted to an
+    integer for sequences) and the current value, or raises :class:`KeyError`
+    when a path component does not exist and :class:`TypeError` when a
+    container type does not support the traversal.
+    """
+    parent = destination
+    value = destination
+    last_key = MISSING
+    for component in keys:
+        parent = value
+        try:
+            key = int(component) if isinstance(value, LIST_TYPES) \
+                else component
+            last_key = key
+            value = value[key]
+        except (TypeError, ValueError):
+            # A non integer index used on a sequence means that the
+            # container type changed underneath the patch node.
+            raise TypeError(
+                'cannot resolve path component {0!r} inside {1} ({2}): '
+                'the container type changed'.format(
+                    component, value, type(value).__name__))
+    return parent, last_key, value
+
+
+def _mismatch_reason(expected, actual):
+    """Build the reason text for an expected/actual value mismatch."""
+    if type(expected) is not type(actual):
+        return ('type changed: expected old value {0!r} ({1}), found '
+                '{2!r} ({3})').format(expected, type(expected).__name__,
+                                      actual, type(actual).__name__)
+    return 'expected old value {0!r}, found {1!r}'.format(
+        expected, actual)
+
+
+def _checked_change(index, destination, node, changes):
+    """Check and apply a ``change`` operation against ``destination``."""
+    old_value, new_value = changes
+    keys = _node_keys(node)
+    path = _canonical_path(node)
+    try:
+        parent, last_key, current = _traverse(destination, keys)
+    except KeyError:
+        return [PatchConflict(
+            index, path,
+            'path does not exist; expected old value {0!r}'.format(
+                old_value))]
+    except (IndexError, TypeError, ValueError) as error:
+        return [PatchConflict(index, path, str(error))]
+    if current != old_value:
+        return [PatchConflict(
+            index, path, _mismatch_reason(old_value, current))]
+    try:
+        parent[last_key] = new_value
+    except Exception as error:  # custom mapping may reject the assignment
+        return [PatchConflict(index, path,
+                              'cannot assign value: {0}'.format(error))]
+    return []
+
+
+def _checked_add(index, destination, node, changes):
+    """Check and apply an ``add`` operation against ``destination``."""
+    conflicts = []
+    try:
+        container = dot_lookup(destination, node)
+    except (KeyError, IndexError, TypeError, ValueError) as error:
+        for key, _value in changes:
+            conflicts.append(PatchConflict(
+                index, _canonical_path(node, key), str(error)))
+        return conflicts
+    for key, value in changes:
+        path = _canonical_path(node, key)
+        if isinstance(container, SET_TYPES):
+            already_present = [item for item in value if item in container]
+            if already_present:
+                conflicts.append(PatchConflict(
+                    index, path,
+                    'add target already contains {0!r}'.format(
+                        already_present)))
+                continue
+            try:
+                container |= value
+            except Exception as error:
+                conflicts.append(PatchConflict(
+                    index, path,
+                    'cannot add value: {0}'.format(error)))
+        elif isinstance(container, LIST_TYPES):
+            if not isinstance(key, int) or key < 0 or key > len(container):
+                conflicts.append(PatchConflict(
+                    index, path,
+                    'list insert index {0!r} is out of range (length {1})'
+                    .format(key, len(container))))
+                continue
+            try:
+                container.insert(key, value)
+            except Exception as error:
+                conflicts.append(PatchConflict(
+                    index, path,
+                    'cannot insert value: {0}'.format(error)))
+        elif isinstance(container, DICT_TYPES):
+            if key in container:
+                conflicts.append(PatchConflict(
+                    index, path,
+                    'add target already exists with value {0!r}'.format(
+                        container[key])))
+                continue
+            try:
+                container[key] = value
+            except Exception as error:
+                conflicts.append(PatchConflict(
+                    index, path,
+                    'cannot add value: {0}'.format(error)))
+        else:
+            conflicts.append(PatchConflict(
+                index, path,
+                'target is not a container ({0})'.format(
+                    type(container).__name__)))
+    return conflicts
+
+
+def _checked_remove(index, destination, node, changes):
+    """Check and apply a ``remove`` operation against ``destination``."""
+    conflicts = []
+    try:
+        container = dot_lookup(destination, node)
+    except (KeyError, IndexError, TypeError, ValueError) as error:
+        for key, _value in changes:
+            conflicts.append(PatchConflict(
+                index, _canonical_path(node, key), str(error)))
+        return conflicts
+    for key, value in changes:
+        path = _canonical_path(node, key)
+        if isinstance(container, SET_TYPES):
+            missing = [item for item in value if item not in container]
+            if missing:
+                conflicts.append(PatchConflict(
+                    index, path,
+                    'remove target {0!r} is missing'.format(missing)))
+                continue
+            try:
+                container -= value
+            except Exception as error:
+                conflicts.append(PatchConflict(
+                    index, path,
+                    'cannot remove value: {0}'.format(error)))
+        elif isinstance(container, LIST_TYPES):
+            if not isinstance(key, int) or key < 0 or key >= \
+                    len(container):
+                conflicts.append(PatchConflict(
+                    index, path,
+                    'list index {0!r} is out of range (length {1})'.format(
+                        key, len(container))))
+                continue
+            if container[key] != value:
+                conflicts.append(PatchConflict(
+                    index, path,
+                    _mismatch_reason(value, container[key])))
+                continue
+            try:
+                del container[key]
+            except Exception as error:
+                conflicts.append(PatchConflict(
+                    index, path,
+                    'cannot remove value: {0}'.format(error)))
+        elif isinstance(container, DICT_TYPES):
+            if key not in container:
+                conflicts.append(PatchConflict(
+                    index, path,
+                    'remove target is missing; expected old value {0!r}'
+                    .format(value)))
+                continue
+            if container[key] != value:
+                conflicts.append(PatchConflict(
+                    index, path,
+                    _mismatch_reason(value, container[key])))
+                continue
+            try:
+                del container[key]
+            except Exception as error:
+                conflicts.append(PatchConflict(
+                    index, path,
+                    'cannot remove value: {0}'.format(error)))
+        else:
+            conflicts.append(PatchConflict(
+                index, path,
+                'target is not a container ({0})'.format(
+                    type(container).__name__)))
+    return conflicts
+
+
+_CHECKED_PATCHERS = {
+    ADD: _checked_add,
+    REMOVE: _checked_remove,
+    CHANGE: _checked_change,
+}
+
+
+def checked_patch(diff_result, destination, in_place=False):
+    """Check a patch against the destination and apply it when it is current.
+
+    Every operation is verified on a working copy before the destination is
+    touched:
+
+    * ``change`` and ``remove`` operations must find their recorded old
+      value at the expected location.
+    * ``add`` operations must target an existing container that does not yet
+      hold the added key/index/item and accept the new value.
+
+    Operations are interpreted sequentially, therefore list indices refer to
+    the state *at the moment the operation runs* and earlier operations are
+    already visible to later ones. Nodes given as lists or tuples are treated
+    literally, so dictionary keys containing dots are never split by the dot
+    notation.
+
+    All locatable conflicts are collected in one pass. When there is at least
+    one conflict nothing is applied and the destination stays unchanged, both
+    for the default copy mode and for ``in_place=True``. Each
+    :class:`PatchConflict` carries the zero based operation number, the
+    canonical path tuple and the concrete reason; a missing value is reported
+    as ``<missing>``, never as ``None`` (``None`` may be a real value).
+
+    :param diff_result: Changes returned by :func:`diff`.
+    :param destination: Structure to apply the changes to.
+    :param in_place: By default the destination is deep copied and the copy
+                     is returned; when ``True`` the destination itself is
+                     modified and returned.
+    :returns: ``(patched_destination, conflicts)`` tuple. When ``conflicts``
+              is non empty, ``patched_destination`` is ``None`` and the
+              destination is guaranteed to be unchanged.
+    :raises PatchApplyError: only when a *custom* container prevents the
+                             already validated patch from being processed,
+                             either because the destination cannot be deep
+                             copied for the check or because its own mutating
+                             method rejects the write during an in place
+                             application. The structural check cannot roll
+                             back arbitrary external side effects performed
+                             by such a custom container, therefore no
+                             rollback of external side effects is promised
+                             beyond leaving the built in containers
+                             untouched.
+    """
+    patches = list(diff_result)
+    try:
+        working_copy = deepcopy(destination)
+    except Exception as error:
+        raise PatchApplyError(
+            'the destination could not be deep copied for the structural '
+            'check: {0}'.format(error))
+
+    conflicts = []
+    for index, (action, node, changes) in enumerate(patches):
+        try:
+            checker = _CHECKED_PATCHERS[action]
+        except KeyError:
+            raise ValueError('unknown patch action {0!r}'.format(action))
+        found = checker(index, working_copy, node, changes)
+        conflicts.extend(found)
+
+    if conflicts:
+        return None, conflicts
+
+    if not in_place:
+        return working_copy, []
+
+    try:
+        return patch(patches, destination, in_place=True), []
+    except Exception as error:
+        raise PatchApplyError(
+            'the patch passed all structural checks but could not be '
+            'applied in place: {0}'.format(error))
 
 
 def diff(first, second, node=None, ignore=None, path_limit=None, expand=False,

@@ -32,6 +32,45 @@ class Conflict(object):
         return 'Conflict({0}, {1})'.format(self.first_patch, self.second_patch)
 
 
+class PatchConflict(object):
+    """Describe a single conflict found while checking a patch.
+
+    A :class:`PatchConflict` is created by
+    :func:`dictdiffer.checked_patch` when an operation of the patch cannot be
+    applied to the current state of the destination. It pinpoints the failing
+    *operation* (its zero-based position in the patch), the *canonical path*
+    of the affected value (a tuple of literal path components, so that keys
+    containing dots are never ambiguous), and a human readable *reason*.
+
+    :param operation: Zero-based index of the patch tuple that failed.
+    :param path: Canonical path tuple of the conflicting value.
+    :param reason: Explanation why the operation cannot be applied.
+    """
+
+    def __init__(self, operation, path, reason):
+        """Initialize a PatchConflict object."""
+        self.operation = operation
+        self.path = tuple(path)
+        self.reason = reason
+
+    def __eq__(self, other):
+        """Compare two patch conflicts."""
+        if not isinstance(other, PatchConflict):  # pragma: no cover
+            return NotImplemented
+        return (self.operation == other.operation
+                and self.path == other.path
+                and self.reason == other.reason)
+
+    def __hash__(self):
+        """Make patch conflicts hashable."""
+        return hash((self.operation, self.path, self.reason))
+
+    def __repr__(self):
+        """Return string representation."""
+        return 'PatchConflict(operation={0}, path={1!r}, reason={2!r})'.format(
+            self.operation, self.path, self.reason)
+
+
 class ConflictFinder(object):
     """Responsible for finding conflicting patches."""
 

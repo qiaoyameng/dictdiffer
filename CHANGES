@@ -1,6 +1,14 @@
 Changes
 =======
 
+Version v0.10.1 (unreleased)
+
+- patch: adds ``checked_patch`` that validates change/remove old values and
+  add preconditions against the current destination, reports every locatable
+  conflict (operation number, canonical path and reason) and applies the
+  patch atomically; dotted dictionary keys are kept literal for list/tuple
+  nodes and list indices are interpreted at each operation's execution stage
+
 Version v0.10.0 (released 2026-07-16)
 
 - chore(setup): migrate from setuptools to hatchling

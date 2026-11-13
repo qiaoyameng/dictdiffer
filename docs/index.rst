@@ -98,6 +98,62 @@ Let's revert the last changes:
     reverted = revert(result, patched)
     assert reverted == first
 
+Checked patching
+----------------
+
+A patch produced on one process may arrive after the destination structure
+has already changed. The :func:`.checked_patch` function verifies every
+operation against the current state before applying anything: ``change`` and
+``remove`` operations must still find their recorded old value, and ``add``
+operations must target an existing container that does not hold the new
+key, index or item yet.
+
+.. code-block:: python
+
+    from dictdiffer import checked_patch
+
+    destination = {'title': 'hello', 'tags': ['a', 'b']}
+    patch_result = [
+        ('change', 'title', ('hello', 'hi')),
+        ('remove', 'tags', [(1, 'b')]),
+    ]
+
+    patched, conflicts = checked_patch(patch_result, destination)
+
+    assert conflicts == []
+    assert patched == {'title': 'hi', 'tags': ['a']}
+    # The original destination is never modified in the default copy mode.
+    assert destination == {'title': 'hello', 'tags': ['a', 'b']}
+
+When an operation is stale, *all* locatable conflicts are returned together
+and the destination stays untouched. Each
+:class:`~dictdiffer.conflict.PatchConflict` exposes the zero based
+``operation`` number, the canonical ``path`` as a tuple of literal path
+components and a human readable ``reason``. A missing value is reported as
+``<missing>`` rather than ``None``, because ``None`` can be a real value.
+
+.. code-block:: python
+
+    patched, conflicts = checked_patch(
+        [('change', 'title', ('stale', 'hi'))], destination)
+
+    assert patched is None
+    assert conflicts[0].operation == 0
+    assert conflicts[0].path == ('title',)
+
+Nodes given as lists or tuples are interpreted literally, so dictionary
+keys containing dots are never split by the dot notation. List indices are
+evaluated against the state at the moment each operation runs, therefore
+earlier insertions and removals are already visible to later operations.
+Passing ``in_place=True`` applies the validated patch directly to the
+destination, but a failed check still leaves it unchanged.
+
+The check works on a private deep copy, so a custom mapping whose mutating
+method raises cannot be rolled back automatically. In that situation
+:class:`~dictdiffer.PatchApplyError` is raised and dictdiffer does not
+promise to undo arbitrary external side effects performed by the custom
+container.
+
 A tolerance can be used to consider closed values as equal.
 The tolerance parameter only applies for int and float.
 
