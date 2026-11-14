@@ -98,6 +98,26 @@ Let's revert the last changes:
     reverted = revert(result, patched)
     assert reverted == first
 
+Two consecutive patches can be composed into one without keeping the
+intermediate object with :func:`.compose`.  It only inspects the patches,
+never fabricates a base object, raises :class:`~dictdiffer.ComposeConflict`
+when the second patch contradicts the intermediate value, and raises
+:class:`~dictdiffer.ComposeUnknown` when a pre-condition cannot be derived
+from the patches (the caller may supply those few values through ``prior``):
+
+.. code-block:: python
+
+    from dictdiffer import compose
+
+    # A -> B and B -> C patches, archived as a single A -> C patch.
+    p = [('change', 'title', ('hello', 'hello!'))]
+    q = [('change', 'title', ('hello!', 'hello!!'))]
+    composed = list(compose(p, q))
+
+    assert composed == [('change', 'title', ('hello', 'hello!!'))]
+    assert patch(composed, first) == patch(q, patch(p, first))
+    assert revert(composed, patch(composed, first)) == first
+
 A tolerance can be used to consider closed values as equal.
 The tolerance parameter only applies for int and float.
 

@@ -8,6 +8,10 @@ Version v0.10.0 (released 2026-07-16)
 - chore(licenses): update license headers to use SPDX
 - diff: fix `path_limit` with no change (#174)
 - merge: support ignore param to diff function
+- compose: add `compose(p, q)` to fold two consecutive patches into one
+  without the base object; raises `ComposeConflict` on contradictory
+  intermediate values and `ComposeUnknown` (resolvable via `prior`) when the
+  patches alone are insufficient
 
 Version 0.9.0 (released 2021-07-22)
 
